@@ -1,0 +1,60 @@
+grafana:
+  enabled: true
+  plugins:
+    - jdbranham-diagram-panel
+    - grafana-polystat-panel
+    - vonage-status-panel
+    - flant-statusmap-panel
+    - heywesty-trafficlight-panel
+    - serrrios-statusoverview-panel
+
+  grafana.ini:
+    server:
+      cookie_secure: true
+      cookie_samesite: none
+      disable_brute_force_login_protection: true
+      disable_login_attempts_validation: true
+      domain: ${domain}
+      root_url: "%(protocol)s://%(domain)s/grafana/"
+      serve_from_sub_path: false
+
+  env:
+    GF_AUTH_ANONYMOUS_ENABLED: "${grafana_anonymous_enabled}"
+    GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+    GF_AUTH_DISABLE_LOGIN_FORM: "false"
+
+alertmanager:
+  enabled: true
+
+prometheus:
+  enabled: true
+  prometheusSpec:
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    retention: ${prometheus_retention}
+    scrapeInterval: ${prometheus_scrape_interval}
+    evaluationInterval: ${prometheus_scrape_interval}
+    logLevel: info
+
+    additionalScrapeConfigs:
+      - job_name: annotation-based-scrape
+        honor_labels: true
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: (.+):(?:\d+);(\d+)
+            replacement: $1:$2
+            target_label: __address__
+
+  prometheus-node-exporter:
+    hostRootFsMount:
+      enabled: false

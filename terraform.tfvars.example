@@ -1,0 +1,20 @@
+kubeconfig_path               = "kubeconfigs/config"
+aws_region                    = "eu-north-1"
+aws_tags = {
+  Owner    = "OWNER"
+  Project  = "capstone"
+  Function = "kubernetes-infra"
+}
+# Host that resolves to ingress (worker public IP, ALB, or DNS name)
+domain                        = "ec2-xx-xx-xx-xx.region.compute.amazonaws.com"
+monitor_namespace             = "monitoring"
+ingress_namespace             = "ingress-nginx"
+ingress_class_name            = "nginx"
+aws_ebs_csi_driver_version    = "2.63.1"
+ingress_nginx_version         = "4.12.2"
+kube_prometheus_stack_version = "72.6.2"
+verify_autodiscovery_smoke_test = true
+grafana_anonymous_enabled     = true
+prometheus_retention          = "10d"
+prometheus_scrape_interval    = "30s"
+storage_class_name            = "gp3-default"

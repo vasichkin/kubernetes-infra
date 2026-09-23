@@ -1,0 +1,24 @@
+
+controller:
+  metrics:
+    port: 10254
+    portName: metrics
+    enabled: true
+    service:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "10254"
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "10254"
+    prometheus.io/path: "/metrics"
+
+  ingressClassResource:
+    name: ${ingress_class_name}
+    enabled: true
+  hostNetwork: true
+  kind: DaemonSet
+  service:
+    type: NodePort
+    nodePorts:
+      http: ${http_node_port}
