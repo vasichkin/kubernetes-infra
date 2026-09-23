@@ -1,82 +1,97 @@
-# Agent rules (Kubernetes platform / OpenTofu)
+# Agent rules — `kubernetes-infra` (platform layer)
 
-Conventions from this project. Apply the same patterns on similar **default cluster infra** repos unless the user overrides them.
+This repository **is** the Kubernetes **platform layer**. It installs shared cluster infrastructure that application repos must not duplicate.
 
-## Scope and layering
+## What this repo owns
 
-- **Platform layer** (this kind of repo): cluster add-ons shared by all apps — ingress, storage CSI, default `StorageClass`, monitoring. No application workloads (WordPress, etc.) here.
-- **App layer** (separate repo): namespaces, deployments, app ingress, app PVCs. Depends on platform already installed; do not duplicate ingress/CSI/monitoring in app repos.
-- Prefer **AWS-oriented** defaults when the reference stack is EKS-like (EBS CSI, gp3). Call out when something is cloud-specific and not portable to minikube/docker-desktop.
 
-## Primary tools
+| Component                           | Location                                     | Notes                                                   |
+| ----------------------------------- | -------------------------------------------- | ------------------------------------------------------- |
+| AWS EBS CSI driver                  | `modules/aws-ebs-csi-driver`                 | Helm in `kube-system`                                   |
+| Default gp3 StorageClass            | `storage.tf`                                 | `ebs.csi.aws.com`, default class annotation             |
+| ingress-nginx                       | `modules/ingress-nginx`                      | DaemonSet, NodePort, metrics for Prometheus             |
+| Prometheus + Grafana + Alertmanager | `modules/kube-prometheus-stack`              | Single `kube-prometheus-stack` chart                    |
+| Grafana ingress (`/grafana`)        | `ingress-grafana.tf`                         | Subpath on `var.domain`, class `var.ingress_class_name` |
+| Autodiscovery smoke test            | `autodiscovery-smoke.tf`                     | Gated by `verify_autodiscovery_smoke_test`              |
+| Post-apply checks                   | `scripts/verify-prometheus-autodiscovery.sh` | Targets API, annotation-based scrape                    |
 
-1. **OpenTofu (`tofu`)** is the primary provisioner — not raw `kubectl apply` for installable components.
-2. **Modules** for each logical component (`modules/<name>/`); root wires modules only — no hardcoded chart versions or environment values in root module blocks.
-3. **Helm** via `helm_release` whenever an official/community chart exists (ingress-nginx, kube-prometheus-stack, aws-ebs-csi-driver, etc.).
 
-## Configuration: single root tfvars file
+**Not in scope here:** application namespaces, deployments, app PVCs, app Ingress rules (e.g. WordPress). Those belong in an **app layer** repo such as `wordpress-k8s-terraform`.
 
-- All tunables live in root **`terraform.tfvars`** (gitignored). Ship **`terraform.tfvars.example`** with placeholders only.
-- OpenTofu **auto-loads** `terraform.tfvars`; do not rely on a custom filename like `variables.tfvars` without `-var-file`.
-- **Backend** bucket/region stay in **`backend.hcl`** (gitignored) + `backend.hcl.example`; they cannot come from tfvars (backend block limitation).
-- **Kubeconfig** path is a variable (default `kubeconfigs/config`); kubeconfig dir is gitignored.
+## Stack position
 
-### What belongs in `terraform.tfvars`
+```text
+kubernetes-terraform-ansible   →  cluster (VPC, nodes, kubeconfig)
+kubernetes-infra (this repo)     →  platform (CSI, StorageClass, ingress, monitoring)
+<app-repo>                     →  workloads only; assumes platform is already applied
+```
 
-Pass through from root to modules — do not hardcode in `main.tf` or static Helm values when the user might change them:
+- Cluster must exist before `tofu apply` here; kubeconfig at `kubeconfigs/config` (gitignored).
+- If an app repo still installs ingress-CSI-monitoring, **remove that duplication** there after this layer is live — avoid double Helm releases.
 
-| Area | Examples |
-|------|----------|
-| Cloud | `aws_region`, `aws_tags` |
-| Access | `kubeconfig_path`, `domain` |
-| Namespaces | `monitor_namespace`, `ingress_namespace` |
-| Ingress | `ingress_class_name`, `ingress_nginx_version` |
-| Storage | `storage_class_name` |
-| Helm chart versions | `aws_ebs_csi_driver_version`, `kube_prometheus_stack_version`, … |
-| Monitoring tuning | `prometheus_retention`, `prometheus_scrape_interval`, `grafana_anonymous_enabled` |
-| Verification | `verify_autodiscovery_smoke_test` |
 
-Chart versions may have **defaults in `variables.tf`** matching the example file, but environment-specific values (domain, region, tags) stay required in tfvars with no fake defaults.
 
-## Module and Helm conventions
+## Tools and layout
 
-- In modules, use **`templatefile("${path.module}/values.yaml.tftpl", { ... })`** or **`file("${path.module}/...")`** — never root-relative paths like `modules/foo/values.yaml` from inside a module.
-- Declare **`hashicorp/kubernetes`** and **`hashicorp/helm`** in `required_providers` (both used).
-- Prefer **`kubernetes_*_v1`** resources over deprecated unpinned types when the provider warns.
-- Pin **Helm chart `version`** from a variable passed from root (EBS CSI, ingress, prometheus stack, etc.).
+1. **OpenTofu (**`tofu`**)** — primary; use **modules** under `modules/<name>/`, root only wires variables into modules.
+2. **Helm** — `helm_release` for charts that exist (EBS CSI, ingress-nginx, kube-prometheus-stack).
+3. Root files: `provider.tf`, `variables.tf`, `main.tf`, `storage.tf`, `ingress-grafana.tf`, `outputs.tf`.
 
-## Monitoring (Prometheus + Grafana)
+Module rules:
 
-- Install **one** chart: **`kube-prometheus-stack`** (Prometheus + Grafana + alertmanager), not separate ad-hoc installs unless the user asks otherwise.
-- Enable **broad autodiscovery** in chart values:
-  - `prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues: false`
-  - `prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues: false`
-  - **`additionalScrapeConfigs`** job for pod annotations: `prometheus.io/scrape`, `port`, `path` (annotation-based-scrape).
-- **Grafana on ingress subpath** when `domain` is set: `serve_from_sub_path: true`, `root_url` with `/grafana/`, plus `kubernetes_ingress_v1` with regex rewrite compatible with ingress-nginx; **`ingress_class_name`** from tfvars must match ingress controller `ingressClassResource.name`.
-- Document Grafana admin password via cluster Secret; avoid committing credentials.
+- Values: `templatefile("${path.module}/values.yaml.tftpl", …)` or `file("${path.module}/…")` — no paths relative to repo root from inside a module.
+- Providers: `hashicorp/kubernetes` and `hashicorp/helm` in `required_providers`.
+- Prefer `kubernetes_*_v1` resources.
+- Chart **versions** and environment knobs come from root variables — not hardcoded in `main.tf` module blocks.
+
+
+
+## Configuration
+
+- `terraform.tfvars` (gitignored): all tunables; OpenTofu auto-loads it — use plain `tofu plan` / `tofu apply`.
+- `terraform.tfvars.example`: committed placeholders; `make setup-tfvars` copies if missing.
+- `backend.hcl` (gitignored) + `backend.hcl.example`: S3 bucket/region at `tofu init -backend-config=backend.hcl` (cannot live in tfvars).
+
+Required / typical tfvars (see example file): `aws_region`, `aws_tags`, `domain`, `kubeconfig_path`, `monitor_namespace`, `ingress_namespace`, `ingress_class_name`, `aws_ebs_csi_driver_version`, `ingress_nginx_version`, `kube_prometheus_stack_version`, monitoring and verification flags.
+
+Defaults in `variables.tf` are only for chart versions and non-environment flags; **domain, region, and tags stay required in tfvars**.
+
+## Monitoring behavior (fixed for this repo)
+
+- **Autodiscovery:** `serviceMonitorSelectorNilUsesHelmValues: false`, `podMonitorSelectorNilUsesHelmValues: false`, plus `additionalScrapeConfigs` job `annotation-based-scrape` (`prometheus.io/scrape`, `port`, `path`).
+- **Grafana:** served under `http://<domain>/grafana/` via ingress subpath (`serve_from_sub_path`, `root_url` in chart values); ingress class must match `ingress_class_name` in ingress-nginx values.
+- **Credentials:** Grafana admin password in cluster Secret only; document retrieval in README, never commit.
+
+
 
 ## Verification
 
-- Provide a **post-apply script** (e.g. `scripts/verify-prometheus-autodiscovery.sh`) that port-forwards Prometheus and checks `/api/v1/targets`:
-  - Minimum count of **UP** core targets (kubelet, node-exporter, etc.).
-  - When smoke test enabled: at least one **UP** target for **`annotation-based-scrape`**.
-- Optional **smoke Deployment** gated by `verify_autodiscovery_smoke_test` with standard `prometheus.io/*` pod annotations.
-- Ingress controller metrics: prefer **pod** scrape annotations (or ServiceMonitor), not service annotations alone, if using pod-based annotation SD.
+After apply: `make verify` or run `scripts/verify-prometheus-autodiscovery.sh` (see README). Expect core targets UP and, when smoke test is on, at least one UP `annotation-based-scrape` target.
 
-## Repo hygiene
+## Hygiene and workflow
 
-- **Gitignore**: `.terraform/`, `terraform.tfvars`, `backend.hcl`, `kubeconfigs/`, state files. Commit **`.terraform.lock.hcl`** and **`terraform.tfvars.example`**.
-- **Makefile** (optional): `init`, `plan`, `apply`, `setup-tfvars`, `verify` — plain `tofu plan` without extra `-var-file` once `terraform.tfvars` exists.
-- **README**: prerequisites, init with `-backend-config=backend.hcl`, plan/apply, Grafana/Prometheus access, verification steps, layout table.
+- Gitignore: `terraform.tfvars`, `backend.hcl`, `kubeconfigs/`, `.terraform/`, state. Commit `.terraform.lock.hcl` and `terraform.tfvars.example`.
+- Makefile: `init`, `plan`, `apply`, `setup-tfvars`, `verify`.
+- Run `tofu plan` before apply; plan output should reflect tfvars (domain, versions, namespaces, tags).
+- Do `tofu apply` to a live cluster only with explicit user approval when policy requires it.
 
-## Execution and safety
 
-- Run **`tofu plan`** before apply; confirm tfvars values appear in plan output for wired variables.
-- Do not **`tofu apply`** to a live cluster without explicit user approval when policy requires it.
-- When reusing patterns from a sibling repo (e.g. `wordpress-k8s-terraform`), **port and fix** (path.module, tfvars centralization, split platform vs app) — do not copy root-relative template paths or duplicate platform modules in app repos.
+
+## AWS assumptions
+
+EBS CSI and gp3 default StorageClass are **AWS-specific**. For local clusters (minikube, docker-desktop), call out incompatibility or alternate modules — do not silently apply this stack unchanged.
+
+## When changing this repo
+
+- New platform capability → new `modules/<name>/` + variables in `variables.tf` / example tfvars + README layout table.
+- Do not add app workloads or app-specific Ingress paths except platform UIs (Grafana).
+- Reference implementation patterns live in sibling `wordpress-k8s-terraform` **only to port fixes** (path.module, tfvars); platform code stays here.
+
+
 
 ## When in doubt
 
-- Ask whether scope is **monitoring-only** vs **full platform** (ingress + CSI + storage class + monitoring).
-- Ask how **Grafana** should be exposed: ingress subpath vs NodePort vs port-forward only.
-- Ask before applying to production or shared clusters; warn on double-install if an app repo still owns the same Helm releases.
+- Confirm the user wants a change to **platform** scope, not an app concern.
+- Warn before apply on shared/production clusters or if app repos still own the same releases.
+- For Grafana exposure changes (subpath vs NodePort vs port-forward only), confirm with the user — **default for this repo is ingress subpath on** `domain`**.**
+
